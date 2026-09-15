@@ -1,0 +1,48 @@
+[project]
+name = "menufy"
+version = "0.1.0"
+description = "Menu photo to translated dish cards with illustrative images."
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    "fastapi>=0.115",
+    "google-genai>=2.23,<3",
+    "ollama>=0.5",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "uvicorn[standard]>=0.32",
+]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.27",
+    "mypy>=2.3.1",
+    "pytest>=8.3",
+    "ruff>=0.8",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.ruff.lint.isort]
+lines-after-imports = 1
+no-lines-before = ["future", "standard-library", "third-party", "first-party", "local-folder"]
+
+# The formatter always enforces two blank lines between top-level definitions,
+# so it is disabled to keep the project's single-blank-line style.
+[tool.ruff.format]
+exclude = ["*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.mypy]
+strict = true
+plugins = ["pydantic.mypy"]
