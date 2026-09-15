@@ -1,0 +1,7 @@
+{
+  "venvPath": "backend",
+  "venv": ".venv",
+  "extraPaths": ["backend"],
+  "include": ["backend/menufy", "backend/tests"],
+  "typeCheckingMode": "standard"
+}
