@@ -3,10 +3,24 @@
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
+import httpx
 from google import genai
+from google.genai import errors as genai_errors
 from google.genai import types
 from ollama import Client as OllamaClient
+from ollama import ResponseError
 from menufy.config import Settings
+from menufy.pipeline.errors import (
+    LLMEmptyResponseError,
+    LLMError,
+    LLMRateLimitError,
+    LLMTimeoutError,
+    LLMUnavailableError,
+)
+
+# HTTP statuses both providers use
+RATE_LIMIT_STATUS = 429
+NOT_FOUND_STATUS = 404
 
 # Image input
 @dataclass(frozen=True, slots=True)
@@ -45,8 +59,28 @@ class OllamaLLM:
         message: dict[str, Any] = {"role": "user", "content": prompt}
         if images:
             message["images"] = [image.data for image in images]
-        response = self._client.chat(model=self._model, messages=[message], format=json_schema)
-        return response.message.content or ""
+        try:
+            response = self._client.chat(model=self._model, messages=[message], format=json_schema)
+        except httpx.TimeoutException as exc:
+            raise LLMTimeoutError(f"{self._model} timed out") from exc
+        # The Ollama client turns a refused connection into a plain ConnectionError.
+        except ConnectionError as exc:
+            raise LLMUnavailableError("Cannot reach Ollama. Is it running?") from exc
+        except ResponseError as exc:
+            raise self._as_llm_error(exc) from exc
+        content = response.message.content or ""
+        if not content.strip():
+            raise LLMEmptyResponseError(f"{self._model} returned an empty response")
+        return content
+
+    def _as_llm_error(self, exc: ResponseError) -> LLMError:
+        if exc.status_code == RATE_LIMIT_STATUS:
+            return LLMRateLimitError(f"Ollama rate limited the request: {exc}")
+        if exc.status_code == NOT_FOUND_STATUS:
+            return LLMUnavailableError(
+                f"Model {self._model} is missing. Run: ollama pull {self._model}"
+            )
+        return LLMError(f"Ollama request failed ({exc.status_code}): {exc}")
 
 # Gemini provider (production)
 class GeminiLLM:
@@ -81,10 +115,39 @@ class GeminiLLM:
         if json_schema is not None:
             config.response_mime_type = "application/json"
             config.response_json_schema = json_schema
-        response = self._client.models.generate_content(
-            model=self._model, contents=contents, config=config
-        )
-        return response.text or ""
+        try:
+            response = self._client.models.generate_content(
+                model=self._model, contents=contents, config=config
+            )
+        except httpx.TimeoutException as exc:
+            raise LLMTimeoutError(f"{self._model} timed out") from exc
+        except genai_errors.APIError as exc:
+            raise self._as_llm_error(exc) from exc
+        text = response.text or ""
+        if not text.strip():
+            reason = _stop_reason(response)
+            raise LLMEmptyResponseError(
+                f"{self._model} returned no text (reason: {reason or 'unknown'})", reason=reason
+            )
+        return text
+
+    def _as_llm_error(self, exc: genai_errors.APIError) -> LLMError:
+        if exc.code == RATE_LIMIT_STATUS:
+            return LLMRateLimitError(f"Gemini quota or rate limit exceeded: {exc}")
+        if isinstance(exc, genai_errors.ServerError):
+            return LLMUnavailableError(f"Gemini is unavailable ({exc.code}): {exc}")
+        return LLMError(f"Gemini request failed ({exc.code}): {exc}")
+
+# Why Gemini returned nothing: a blocked prompt or a non-STOP finish reason
+def _stop_reason(response: types.GenerateContentResponse) -> str | None:
+    feedback = response.prompt_feedback
+    if feedback is not None and feedback.block_reason is not None:
+        return str(feedback.block_reason.name)
+    if response.candidates:
+        finish_reason = response.candidates[0].finish_reason
+        if finish_reason is not None:
+            return str(finish_reason.name)
+    return None
 
 # Provider factory
 def build_llm(settings: Settings) -> LLM:
